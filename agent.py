@@ -66,28 +66,21 @@ def safe_mask(s: str, visible=6) -> str:
     return s[:visible] + "…" if len(s) > visible else s
 
 # -------- Debug wrapper --------
-def debug_post(url: str, *, data: dict=None, files: dict=None, headers: dict=None, timeout:int=TIMEOUT):
-    """requests.post wrapper: payload ve yanıtı görünür biçimde loglar, Authorization’ı maskele."""
-    log_headers = dict(headers or {})
-    if "Authorization" in log_headers:
-        log_headers["Authorization"] = "Bearer " + safe_mask(log_headers["Authorization"].split()[-1])
-    print("\n[HTTP] POST", url)
-    print("[HTTP] headers:", json.dumps(log_headers, indent=2))
-    # data log
-    if data:
-        printable = {k:(v if k!="prompt" else (v[:140]+"…(trim)")) for k,v in data.items()}
-        print("[HTTP] form-data fields:", json.dumps(printable, indent=2, ensure_ascii=False))
-    if files:
-        files_keys = {k: {"name":v[0], "mime":v[2], "size": len(v[1]) if isinstance(v[1], (bytes,bytearray)) else "stream"} 
-                      for k,v in files.items()}
-        print("[HTTP] files:", json.dumps(files_keys, indent=2))
-    resp = requests.post(url, data=data, files=files, json=form_data, headers=headers, timeout=timeout)
-    print("[HTTP] status:", resp.status_code)
-    try:
-        print("[HTTP] body:", json.dumps(resp.json(), indent=2)[:2000], "…")
-    except Exception:
-        print("[HTTP] body(raw) length:", len(resp.content))
-    return resp
+def images_generate(prompt: str, size: str, n:int=1) -> dict:
+    url = f"{OPENAI_API_BASE}/images/generations"
+    payload = {
+        "model": MODEL,
+        "prompt": prompt,
+        "size": size,
+        "n": n,
+        "response_format": "b64_json",
+    }
+    headers = {**HEADERS, "Content-Type": "application/json"}
+    resp = debug_post(url, json_data=payload, headers=headers)
+    if resp.status_code != 200:
+        raise RuntimeError(f"Generate failed: {resp.status_code} {resp.text[:300]}")
+    return resp.json()
+
 
 # -------- OpenAI Images (raw HTTP) --------
 def images_generate(prompt: str, size: str, n:int=1) -> dict:
