@@ -85,18 +85,21 @@ def images_generate(prompt: str, size: str, n:int=1) -> dict:
 # -------- OpenAI Images (raw HTTP) --------
 def images_generate(prompt: str, size: str, n:int=1) -> dict:
     url = f"{OPENAI_API_BASE}/images/generations"
-    data = {
+    # Bu endpointte kare dışı boyutlar 400 veriyor; kare sabitliyoruz.
+    gen_size = "1024x1024"
+    payload = {
         "model": MODEL,
         "prompt": prompt,
-        "size": size,
+        "size": gen_size,
         "n": n,
         "response_format": "b64_json",
     }
-    # multipart değil -> application/x-www-form-urlencoded; requests form-data olarak gönderir.
-    resp = debug_post(url, data=data, headers=HEADERS)
+    headers = {**HEADERS, "Content-Type": "application/json"}
+    resp = debug_post(url, json_data=payload, headers=headers)
     if resp.status_code != 200:
         raise RuntimeError(f"Generate failed: {resp.status_code} {resp.text[:300]}")
     return resp.json()
+
 
 def images_edit(image_bytes: bytes, prompt: str, size: str, n:int=1, mask_bytes: Optional[bytes]=None) -> dict:
     url = f"{OPENAI_API_BASE}/images/edits"
