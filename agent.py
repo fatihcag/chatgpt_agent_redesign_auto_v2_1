@@ -20,6 +20,7 @@ FORCE_SQUARE_FOR_EDITS = os.getenv("FORCE_SQUARE_FOR_EDITS", "1") in ("1","true"
 
 HEADERS = {
     "Authorization": f"Bearer {OPENAI_API_KEY}",
+    "Content-Type": "application/json"
 }
 
 if not OPENAI_API_KEY:
@@ -80,7 +81,7 @@ def debug_post(url: str, *, data: dict=None, files: dict=None, headers: dict=Non
         files_keys = {k: {"name":v[0], "mime":v[2], "size": len(v[1]) if isinstance(v[1], (bytes,bytearray)) else "stream"} 
                       for k,v in files.items()}
         print("[HTTP] files:", json.dumps(files_keys, indent=2))
-    resp = requests.post(url, data=data, files=files, headers=headers, timeout=timeout)
+    resp = requests.post(url, data=data, files=files, json=form_data, headers=headers, timeout=timeout)
     print("[HTTP] status:", resp.status_code)
     try:
         print("[HTTP] body:", json.dumps(resp.json(), indent=2)[:2000], "…")
