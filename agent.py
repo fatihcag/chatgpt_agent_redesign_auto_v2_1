@@ -142,39 +142,44 @@ def debug_post(url: str, *, data: dict=None, json_data: dict=None,
 # OpenAI Images
 # =========================
 def images_generate(prompt: str, size: str, n:int=1) -> dict:
-    """Generations endpoint JSON bekler. Kare dışı boyut 400 verebildiği için 1024x1024 sabitliyoruz."""
+    """Generations endpoint JSON bekler. Kare dışı boyutlar 400 verebildiği için 1024x1024 sabitliyoruz."""
     url = f"{OPENAI_API_BASE}/images/generations"
-    gen_size = "1024x1024"  # sabit
+    gen_size = "1024x1024"
     payload = {
         "model": MODEL,
         "prompt": prompt,
         "size": gen_size,
         "n": n,
-       
+        "response_format": "b64_json",
     }
     headers = {**BASE_HEADERS, "Content-Type": "application/json"}
-    resp = debug_post(url, json_data=payload, headers=headers)
+    resp = debug_post(url, json_data=payload, headers=headers, timeout=HTTP_TIMEOUT)
     if resp.status_code != 200:
-        raise RuntimeError(f"Generate failed: {resp.status_code} {resp.text[:400]}")
+        raise RuntimeError(f"Generate failed: {resp.status_code} {resp.text[:500]}")
     return resp.json()
 
+
 def images_edit(image_bytes: bytes, prompt: str, size: str, n:int=1, mask_bytes: Optional[bytes]=None) -> dict:
-    """Edits endpoint multipart/form-data ister. Content-Type'ı requests ayarlasın (elle eklemiyoruz)."""
+    """Edits endpoint multipart/form-data ister. Content-Type'ı 'requests' belirlesin; elle ekleme."""
     url = f"{OPENAI_API_BASE}/images/edits"
+
     files = {"image": ("input.png", image_bytes, "image/png")}
     if mask_bytes is not None:
         files["mask"] = ("mask.png", mask_bytes, "image/png")
+
+    # DİKKAT: 'response_format' BURAYA EKLENMEYECEK → 400: Unknown parameter hatası veriyor
     form = {
         "model": MODEL,
         "prompt": prompt,
         "size": size,
         "n": n,
-        "response_format": "b64_json",
     }
-    resp = debug_post(url, data=form, files=files, headers=BASE_HEADERS)
+
+    resp = debug_post(url, data=form, files=files, headers=BASE_HEADERS, timeout=HTTP_TIMEOUT)
     if resp.status_code != 200:
-        raise RuntimeError(f"Edits failed: {resp.status_code} {resp.text[:400]}")
+        raise RuntimeError(f"Edits failed: {resp.status_code} {resp.text[:500]}")
     return resp.json()
+
 
 
 # =========================
