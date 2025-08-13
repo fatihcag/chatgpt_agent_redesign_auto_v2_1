@@ -150,7 +150,7 @@ def images_generate(prompt: str, size: str, n:int=1) -> dict:
         "prompt": prompt,
         "size": gen_size,
         "n": n,
-        "response_format": "b64_json",
+       
     }
     headers = {**BASE_HEADERS, "Content-Type": "application/json"}
     resp = debug_post(url, json_data=payload, headers=headers)
