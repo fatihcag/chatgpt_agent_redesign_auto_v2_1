@@ -1,92 +1,124 @@
-import os, sys, io, json, time, base64, argparse, hashlib
+# agent.py
+import os, sys, io, json, time, argparse, base64
 from pathlib import Path
-from typing import Tuple, Optional
+from typing import Optional, Tuple
 import requests
-from PIL import Image, ImageOps
-
+from PIL import Image
 from dotenv import load_dotenv
+
 load_dotenv()
 
-# -------- Config --------
-OPENAI_API_KEY   = os.getenv("OPENAI_API_KEY", "").strip()
-OPENAI_API_BASE  = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1").rstrip("/")
-MODEL            = os.getenv("IMAGE_MODEL", "gpt-image-1").strip()
-IMAGE_SIZE       = os.getenv("IMAGE_SIZE", "1024x1024").strip()        # edits için önerilen kare
-FINAL_SIZE       = os.getenv("FINAL_SIZE", "2048x1024").strip()        # kaydedilecek nihai boyut (örn. 2:1)
-TIMEOUT          = int(os.getenv("HTTP_TIMEOUT", "120"))
-RETRY_MAX        = int(os.getenv("RETRY_MAX", "3"))
-RETRY_BACKOFF    = float(os.getenv("RETRY_BACKOFF", "1.6"))
+# =========================
+# Config
+# =========================
+OPENAI_API_KEY  = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_API_BASE = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1").rstrip("/")
+MODEL           = os.getenv("IMAGE_MODEL", "gpt-image-1").strip()
+IMAGE_SIZE      = os.getenv("IMAGE_SIZE", "1024x1024").strip()     # edits denemesi için (kare önerilir)
+FINAL_SIZE      = os.getenv("FINAL_SIZE", "2048x1024").strip()     # nihai çıktı boyutu
+HTTP_TIMEOUT    = int(os.getenv("HTTP_TIMEOUT", "120"))
+RETRY_MAX       = int(os.getenv("RETRY_MAX", "3"))
+RETRY_BACKOFF   = float(os.getenv("RETRY_BACKOFF", "1.6"))
 FORCE_SQUARE_FOR_EDITS = os.getenv("FORCE_SQUARE_FOR_EDITS", "1") in ("1","true","True")
 
-HEADERS = {
-    "Authorization": f"Bearer {OPENAI_API_KEY}",
-    "Content-Type": "application/json"
-}
-
 if not OPENAI_API_KEY:
-    print("[FATAL] OPENAI_API_KEY missing in .env", file=sys.stderr)
+    print("[FATAL] OPENAI_API_KEY missing", file=sys.stderr)
     sys.exit(1)
 
-# -------- Utilities --------
-def parse_size(size_str: str) -> Tuple[int,int]:
-    w, h = size_str.lower().split("x")
+BASE_HEADERS = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
+
+# Output kökü: varsa volume'a yaz
+OUT_BASE = Path("/mnt/data/output") if Path("/mnt/data").exists() else Path("output")
+
+
+# =========================
+# Utils
+# =========================
+def parse_size(s: str) -> Tuple[int, int]:
+    w, h = s.lower().split("x")
     return int(w), int(h)
 
 def image_to_png_bytes_rgb(path: Path) -> bytes:
-    """Alpha dahil sorunları önlemek için görüntüyü RGB'ye çevirip temiz PNG olarak encode et."""
     im = Image.open(path).convert("RGB")
     buf = io.BytesIO()
     im.save(buf, format="PNG", optimize=True)
     return buf.getvalue()
 
 def pad_to_square(png_bytes: bytes, fill=(255,255,255)) -> bytes:
-    """Gerektiğinde edits endpoint’i için kare pad’leme (beyaz zemin)."""
     im = Image.open(io.BytesIO(png_bytes)).convert("RGB")
     s = max(im.width, im.height)
     canvas = Image.new("RGB", (s, s), fill)
-    x = (s - im.width)//2
-    y = (s - im.height)//2
-    canvas.paste(im, (x,y))
+    canvas.paste(im, ((s - im.width)//2, (s - im.height)//2))
     out = io.BytesIO()
     canvas.save(out, format="PNG", optimize=True)
     return out.getvalue()
 
-def resize_to(png_bytes: bytes, size_str: str) -> bytes:
-    w, h = parse_size(size_str)
+def resize_to(png_bytes: bytes, size: str) -> bytes:
+    w, h = parse_size(size)
     im = Image.open(io.BytesIO(png_bytes))
-    im = im.resize((w,h), Image.LANCZOS)
+    im = im.resize((w, h), Image.LANCZOS)
     out = io.BytesIO()
     im.save(out, format="PNG", optimize=True)
     return out.getvalue()
 
-def b64_to_png_bytes(b64: str) -> bytes:
+def b64_to_png(b64: str) -> bytes:
     return base64.b64decode(b64)
 
-def safe_mask(s: str, visible=6) -> str:
-    return s[:visible] + "…" if len(s) > visible else s
 
-# -------- Debug wrapper --------
+# =========================
+# Debug POST wrapper  ✅
+# =========================
+def _mask(token: str, visible=6) -> str:
+    try:
+        return token[:visible] + "…" if len(token) > visible else token
+    except Exception:
+        return "…"
+
+def debug_post(url: str, *, data: dict=None, json_data: dict=None,
+               files: dict=None, headers: dict=None, timeout:int=HTTP_TIMEOUT):
+    """requests.post için güvenli loglayıcı (Authorization maskeli)."""
+    log_headers = dict(headers or {})
+    if "Authorization" in log_headers:
+        try:
+            log_headers["Authorization"] = "Bearer " + _mask(log_headers["Authorization"].split()[-1])
+        except Exception:
+            log_headers["Authorization"] = "Bearer …"
+    print("\n[HTTP] POST", url)
+    print("[HTTP] headers:", json.dumps(log_headers, indent=2))
+    if json_data is not None:
+        pr = dict(json_data)
+        if "prompt" in pr and isinstance(pr["prompt"], str):
+            pr["prompt"] = pr["prompt"][:140] + "…(trim)"
+        print("[HTTP] json:", json.dumps(pr, indent=2, ensure_ascii=False))
+    if data is not None:
+        pr = {}
+        for k, v in data.items():
+            if k == "prompt" and isinstance(v, str):
+                pr[k] = v[:140] + "…(trim)"
+            else:
+                pr[k] = v
+        print("[HTTP] form-data:", json.dumps(pr, indent=2, ensure_ascii=False))
+    if files:
+        meta = {k: {"name": v[0], "mime": v[2], "size": (len(v[1]) if isinstance(v[1], (bytes, bytearray)) else "stream")}
+                for k, v in files.items()}
+        print("[HTTP] files:", json.dumps(meta, indent=2))
+    resp = requests.post(url, headers=headers, data=data, json=json_data, files=files, timeout=timeout)
+    print("[HTTP] status:", resp.status_code)
+    try:
+        body = resp.json()
+        print("[HTTP] body:", json.dumps(body, indent=2)[:2000], "…")
+    except Exception:
+        print("[HTTP] body(raw) len:", len(resp.content))
+    return resp
+
+
+# =========================
+# OpenAI Images
+# =========================
 def images_generate(prompt: str, size: str, n:int=1) -> dict:
+    """Generations endpoint JSON bekler. Kare dışı boyut 400 verebildiği için 1024x1024 sabitliyoruz."""
     url = f"{OPENAI_API_BASE}/images/generations"
-    payload = {
-        "model": MODEL,
-        "prompt": prompt,
-        "size": size,
-        "n": n,
-        "response_format": "b64_json",
-    }
-    headers = {**HEADERS, "Content-Type": "application/json"}
-    resp = debug_post(url, json_data=payload, headers=headers)
-    if resp.status_code != 200:
-        raise RuntimeError(f"Generate failed: {resp.status_code} {resp.text[:300]}")
-    return resp.json()
-
-
-# -------- OpenAI Images (raw HTTP) --------
-def images_generate(prompt: str, size: str, n:int=1) -> dict:
-    url = f"{OPENAI_API_BASE}/images/generations"
-    # Bu endpointte kare dışı boyutlar 400 veriyor; kare sabitliyoruz.
-    gen_size = "1024x1024"
+    gen_size = "1024x1024"  # sabit
     payload = {
         "model": MODEL,
         "prompt": prompt,
@@ -94,126 +126,119 @@ def images_generate(prompt: str, size: str, n:int=1) -> dict:
         "n": n,
         "response_format": "b64_json",
     }
-    headers = {**HEADERS, "Content-Type": "application/json"}
+    headers = {**BASE_HEADERS, "Content-Type": "application/json"}
     resp = debug_post(url, json_data=payload, headers=headers)
     if resp.status_code != 200:
-        raise RuntimeError(f"Generate failed: {resp.status_code} {resp.text[:300]}")
+        raise RuntimeError(f"Generate failed: {resp.status_code} {resp.text[:400]}")
     return resp.json()
 
-
 def images_edit(image_bytes: bytes, prompt: str, size: str, n:int=1, mask_bytes: Optional[bytes]=None) -> dict:
+    """Edits endpoint multipart/form-data ister. Content-Type'ı requests ayarlasın (elle eklemiyoruz)."""
     url = f"{OPENAI_API_BASE}/images/edits"
-    files = {
-        "image": ("input.png", image_bytes, "image/png"),
-    }
+    files = {"image": ("input.png", image_bytes, "image/png")}
     if mask_bytes is not None:
         files["mask"] = ("mask.png", mask_bytes, "image/png")
-    data = {
+    form = {
         "model": MODEL,
         "prompt": prompt,
         "size": size,
         "n": n,
         "response_format": "b64_json",
     }
-    resp = debug_post(url, data=data, files=files, headers=HEADERS)
+    resp = debug_post(url, data=form, files=files, headers=BASE_HEADERS)
     if resp.status_code != 200:
-        raise RuntimeError(f"Edits failed: {resp.status_code} {resp.text[:300]}")
+        raise RuntimeError(f"Edits failed: {resp.status_code} {resp.text[:400]}")
     return resp.json()
 
-# -------- Pipeline --------
-def run_one_image(src_path: Path, out_dir: Path, prompt: str):
-    print(f"\n[RUN] {src_path.name}")
 
-    # 1) PNG’yi güvenli biçimde yeniden encode et
-    png_bytes = image_to_png_bytes_rgb(src_path)
+# =========================
+# Pipeline
+# =========================
+def run_one(src: Path, out_dir: Path, prompt: str):
+    print(f"\n[RUN] {src.name}")
+    png_bytes = image_to_png_bytes_rgb(src)
     print(f"[INFO] re-encoded PNG size: {len(png_bytes)} bytes")
 
-    # 2) Edits için gerekirse kare pad
+    # Edits için kare / boyut hazırlığı
     edit_size = IMAGE_SIZE
     if FORCE_SQUARE_FOR_EDITS:
-        w,h = parse_size(IMAGE_SIZE)
+        w, h = parse_size(IMAGE_SIZE)
         if w != h:
-            print(f"[WARN] IMAGE_SIZE={IMAGE_SIZE} kare değil → edits için square pad etkin.")
-            edit_size = "1024x1024"  # edits kare boyut (genelde en uyumlusu)
-            png_bytes_sq = pad_to_square(png_bytes)
+            print(f"[WARN] IMAGE_SIZE={IMAGE_SIZE} kare değil; edits'i 1024x1024 ile deneyeceğim.")
+            edit_size = "1024x1024"
+            png_sq = pad_to_square(png_bytes)
         else:
-            png_bytes_sq = png_bytes
+            png_sq = png_bytes
     else:
-        png_bytes_sq = png_bytes
+        png_sq = png_bytes
 
-    # 3) edits→retry with backoff
+    # 1) Edits dene (retry)
+    result = None
     last_err = None
     for attempt in range(1, RETRY_MAX+1):
         try:
             print(f"[TRY] edits attempt {attempt}/{RETRY_MAX} size={edit_size}")
-            result = images_edit(png_bytes_sq, prompt=prompt, size=edit_size, n=1)
-            img_b64 = result["data"][0]["b64_json"]
-            out_png = b64_to_png_bytes(img_b64)
+            r = images_edit(png_sq, prompt=prompt, size=edit_size, n=1)
+            b64 = r["data"][0]["b64_json"]
+            out_png = b64_to_png(b64)
             print("[OK] edits succeeded.")
+            result = out_png
             break
         except Exception as e:
             last_err = e
             print(f"[ERR] edits failed: {e}")
             if attempt < RETRY_MAX:
-                sleep_s = RETRY_BACKOFF ** attempt
-                print(f"[WAIT] backoff {sleep_s:.2f}s …")
-                time.sleep(sleep_s)
-            else:
-                print("[FALLBACK] switching to generations…")
-                result = None
+                wait = RETRY_BACKOFF ** attempt
+                print(f"[WAIT] backoff {wait:.2f}s …")
+                time.sleep(wait)
 
-    # 4) Fallback generate (aynı prompt, FINAL_SIZE’ı deneyelim; olmazsa 1024x1024)
+    # 2) Fallback: generations (1024x1024)
     if result is None:
-        try:
-            print(f"[TRY] generate size={FINAL_SIZE}")
-            result = images_generate(prompt=prompt, size=FINAL_SIZE, n=1)
-        except Exception as ge:
-            print(f"[ERR] generate failed at FINAL_SIZE: {ge}")
-            print("[TRY] generate 1024x1024 connectivity test")
-            result = images_generate(prompt=prompt, size="1024x1024", n=1)
-
-        img_b64 = result["data"][0]["b64_json"]
-        out_png = b64_to_png_bytes(img_b64)
+        print("[FALLBACK] switching to generations …")
+        r = images_generate(prompt=prompt, size="1024x1024", n=1)
+        b64 = r["data"][0]["b64_json"]
+        result = b64_to_png(b64)
         print("[OK] generate succeeded.")
 
-    # 5) Nihai boyuta ölçekle (layout kırpmadan)
-    final_png = resize_to(out_png, FINAL_SIZE)
+    # 3) Nihai ölçüye ölçekle
+    final_png = resize_to(result, FINAL_SIZE)
 
-    # 6) Kaydet
+    # 4) Kaydet
     out_dir.mkdir(parents=True, exist_ok=True)
-    stem = src_path.stem
-    out_path = out_dir / f"{stem}__redesign.png"
+    out_path = out_dir / f"{src.stem}__redesign.png"
     with open(out_path, "wb") as f:
         f.write(final_png)
     print(f"[SAVE] {out_path} ({len(final_png)} bytes)")
     return out_path
 
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--input",  type=str, default="input", help="Girdi klasörü (PNG)")
-    ap.add_argument("--output", type=str, default="output", help="Çıktı klasörü")
+    ap.add_argument("--input",  type=str, default="input")
+    ap.add_argument("--output", type=str, default=str(OUT_BASE))
     ap.add_argument("--prompt", type=str, required=False, default=(
-        "Freepik style, clean modern mobile UI redesign, keep original layout, spacing and hierarchy, "
-        "change color palette, icons, images and texts, professional app screens, crisp typography, "
-        "realistic device bezels, soft shadows, cohesive visual system"
+        "Freepik style, clean modern mobile UI redesign, keep original layout, spacing and hierarchy exactly; "
+        "change color palette, icons, images and all texts; final 2:1 canvas; "
+        "realistic device mockups with glossy highlights, soft shadows, crisp typography, "
+        "cohesive Freepik-inspired color grading, vector icons"
     ))
     args = ap.parse_args()
 
-    in_dir  = Path(args.input)
+    in_dir = Path(args.input)
     out_dir = Path(args.output)
+
     if not in_dir.exists():
-        print(f"[FATAL] Input folder not found: {in_dir}")
+        print(f"[FATAL] Input folder not found: {in_dir}", file=sys.stderr)
         sys.exit(1)
 
     images = [p for p in in_dir.iterdir() if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp")]
+    print(f"[INFO] found {len(images)} image(s) in input")
     if not images:
-        print("[WARN] No images found in input/.")
         return
 
-    print(f"[INFO] Found {len(images)} images in {in_dir}")
     for p in images:
         try:
-            run_one_image(p, out_dir, prompt=args.prompt)
+            run_one(p, out_dir, args.prompt)
         except Exception as e:
             print(f"[ERROR] {p.name} failed: {e}")
 
