@@ -1,4 +1,6 @@
 # agent.py
+print("[BOOT] agent.py v2.1 with debug_post-guard")
+
 import os, sys, io, json, time, argparse, base64
 from pathlib import Path
 from typing import Optional, Tuple
@@ -7,6 +9,19 @@ from PIL import Image
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
+# --- put this right after imports & dotenv load ---
+try:
+    debug_post  # noqa: F821  # exists?
+except NameError:
+    import requests
+    def debug_post(url: str, *, data=None, json_data=None, files=None, headers=None, timeout=120):
+        # minimal fallback (no pretty logs, just a safe POST)
+        return requests.post(url, headers=headers, data=data, json=json_data, files=files, timeout=timeout)
+# --- end fallback ---
+
+
 
 # =========================
 # Config
