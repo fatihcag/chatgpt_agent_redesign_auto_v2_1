@@ -1,5 +1,16 @@
 # agent.py
-print("[BOOT] agent.py v2.1 with debug_post-guard")
+print("[BOOT] agent.py v2.1 with debug_post-guard")  # görünür işaret
+
+# --- debug_post guard: yoksa minimal fallback tanımla ---
+try:
+    debug_post  # noqa: F821
+except NameError:
+    import requests as _rq
+    def debug_post(url: str, *, data=None, json_data=None, files=None, headers=None, timeout=120):
+        # Minimal fallback: sadece isteği gönderir (log yok).
+        return _rq.post(url, headers=headers, data=data, json=json_data, files=files, timeout=timeout)
+# --- end guard ---
+
 
 import os, sys, io, json, time, argparse, base64
 from pathlib import Path
